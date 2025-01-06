@@ -2,16 +2,16 @@ import urllib.request
 import subprocess
 import os
 import platform
-import zipfile
 from Screens.MessageBox import MessageBox
 from Screens.Screen import Screen
 from Components.ActionMap import ActionMap
 from Components.Label import Label
 from Components.Button import Button
+from Components.Pixmap import Pixmap
 from Tools.Directories import resolveFilename, SCOPE_PLUGINS
 from Plugins.Plugin import PluginDescriptor
 
-PLUGIN_VERSION = "1.2"  # Verzija plugina
+PLUGIN_VERSION = "1.3"
 PLUGIN_NAME = "CiefpSettingsT2miAbertis"
 ICON_PATH = "/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/icon.png"
 ASTRA_CONF_URL = "https://raw.githubusercontent.com/ciefp/ciefpsettings-enigma2-Abertis-t2mi/refs/heads/main/astra%20abertis%20script%20arm%20(%20UHD%204K%20)/etc/astra/astra.conf"
@@ -22,12 +22,18 @@ ABERTIS_MIPS_URL = "https://github.com/ciefp/ciefpsettings-enigma2-Abertis-t2mi/
 
 class CiefpSettingsT2miAbertis(Screen):
     skin = """
-    <screen name="CiefpSettingsT2miAbertis" position="center,center" size="900,600" title="CiefpSettings T2mi Abertis Installer">
-        <widget name="info" position="10,10" size="880,500" font="Regular;20" valign="center" halign="left" />
-        <widget name="status" position="10,520" size="880,40" font="Regular;20" valign="center" halign="left" />
-        <widget name="key_red" position="10,570" size="200,40" font="Regular;18" halign="center" backgroundColor="#9F1313" />
-        <widget name="key_green" position="690,570" size="200,40" font="Regular;18" halign="center" backgroundColor="#1F771F" />
-        <widget name="version_label" position="10,600" size="880,40" font="Regular;18" valign="center" halign="center" />
+    <screen name="CiefpSettingsT2miAbertis" position="center,center" size="1200,600" title="CiefpSettings T2mi Abertis Installer">
+        <!-- Menu section -->
+        <widget name="info" position="10,10" size="590,450" font="Regular;22" valign="center" halign="left" />
+
+        <!-- Background section -->
+        <ePixmap pixmap="/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/background.png" position="610,10" size="600,450" alphatest="on" />
+
+        <!-- Status section -->
+        <widget name="status" position="10,460" size="1180,60" font="Bold;22" valign="center" halign="center" backgroundColor="#cccccc" foregroundColor="#000000" />
+        <widget name="key_red" position="10,530" size="380,60" font="Bold;24" halign="center" backgroundColor="#9F1313" foregroundColor="#000000" />
+        <widget name="key_green" position="410,530" size="380,60" font="Bold;24" halign="center" backgroundColor="#1F771F" foregroundColor="#000000" />
+        <widget name="key_yellow" position="810,530" size="380,60" font="Bold;24" halign="center" backgroundColor="#D6A200" foregroundColor="#000000" />
     </screen>
     """
 
@@ -35,18 +41,38 @@ class CiefpSettingsT2miAbertis(Screen):
         self.session = session
         Screen.__init__(self, session)
         self.setupUI()
-        self.startInstallation()
+        self.showPrompt()
 
     def setupUI(self):
-        self["info"] = Label("Initializing plugin installation...")
+        self["info"] = Label("Initializing plugin...")
         self["status"] = Label("")
         self["key_red"] = Button("Exit")
-        self["key_green"] = Button("Reboot")
-        self["version_label"] = Label(f"Plugin Version: {PLUGIN_VERSION}")  # Prikazivanje verzije plugina
+        self["key_green"] = Button("Install")
+        self["key_yellow"] = Button("Update")
         self["actions"] = ActionMap(["ColorActions", "SetupActions"], {
             "red": self.exitPlugin,
-            "green": self.rebootSystem
+            "green": self.startInstallation,
+            "yellow": self.runUpdate,
+            "cancel": self.close
         }, -1)
+
+    def showPrompt(self):
+        self["info"].setText(
+            "This plugin will install the following components:\n"
+            "- Astra-SM\n"
+            "- Configuration files (sysctl.conf, astra.conf)\n"
+            "- SoftCam.Key\n"
+            "- Abertis script\n\n"
+            "Do you want to proceed with the installation?"
+        )
+        self["status"].setText("Awaiting your choice.")
+    def runUpdate(self):
+        try:
+            self["status"].setText("Updating plugin...")
+            self.runCommand('wget -q "--no-check-certificate" https://raw.githubusercontent.com/ciefp/CiefpSettingsT2miAbertis/main/installer.sh -O - | /bin/sh')
+            self["status"].setText("Update complete.")
+        except Exception as e:
+            self["status"].setText(f"Update failed: {str(e)}")
 
     def startInstallation(self):
         installed_files = []
@@ -72,26 +98,21 @@ class CiefpSettingsT2miAbertis(Screen):
 
             self["info"].setText("Downloading and copying configuration files...")
 
-            # Preuzimanje i kopiranje sysctl.conf
             self.downloadAndSave(SYSCTL_CONF_URL, "/etc/sysctl.conf")
             installed_files.append("sysctl.conf")
 
-            # Preuzimanje i čuvanje astra.conf fajla
             os.makedirs("/etc/astra", exist_ok=True)
             self.downloadAndSave(ASTRA_CONF_URL, "/etc/astra/astra.conf")
             installed_files.append("astra.conf")
 
-            # Preuzimanje i kopiranje Abertis skripte
             os.makedirs("/etc/astra/scripts", exist_ok=True)
             self.downloadAndSave(ABERTIS_ARM_URL, "/etc/astra/scripts/abertis", chmod=0o755)
             installed_files.append("abertis")
 
-            # Preuzimanje i čuvanje softcam.key fajla na prvu lokaciju
             os.makedirs("/etc/tuxbox/config/oscam-emu", exist_ok=True)
             self.downloadAndSave(SOFTCAM_KEY_URL, "/etc/tuxbox/config/softcam.key")
             installed_files.append("softcam.key (/etc/tuxbox/config/)")
 
-            # Kopiranje softcam.key fajla na drugu lokaciju
             self.downloadAndSave(SOFTCAM_KEY_URL, "/etc/tuxbox/config/oscam-emu/softcam.key")
             installed_files.append("softcam.key (/etc/tuxbox/config/oscam-emu/)")
 
@@ -100,21 +121,22 @@ class CiefpSettingsT2miAbertis(Screen):
                 *[f"- {file}" for file in installed_files],
                 "\nInstallation complete. Please reboot your system."
             ]))
+
+            self.session.openWithCallback(self.rebootPrompt, MessageBox, "Installation complete! Do you want to reboot now?", MessageBox.TYPE_YESNO)
         except Exception as e:
             self["status"].setText(f"Error: {str(e)}")
 
     def downloadAndSave(self, url, dest_path, chmod=None):
         try:
             self["info"].setText(f"Downloading {dest_path}...")
-            urllib.request.urlretrieve(url, dest_path)  # Preuzimanje fajla sa URL-a
+            urllib.request.urlretrieve(url, dest_path)
 
-            # Ako su prava (chmod) postavljena, menjamo prava fajla
             if chmod:
                 os.chmod(dest_path, chmod)
 
-            self["status"].setText(f"{dest_path} saved successfully.")  # Prikazivanje uspeha
+            self["status"].setText(f"{dest_path} saved successfully.")
         except Exception as e:
-            self["status"].setText(f"Error: {str(e)}")  # Prikazivanje greške ako nešto nije u redu
+            self["status"].setText(f"Error: {str(e)}")
 
     def runCommand(self, command):
         try:
@@ -124,23 +146,20 @@ class CiefpSettingsT2miAbertis(Screen):
                 raise Exception(stderr.decode("utf-8"))
         except Exception as e:
             self["status"].setText(f"Error: {str(e)}")
+    def rebootPrompt(self, confirmed):
+        if confirmed:
+            self.close()  # Zatvori plugin pre restarta
+            self.runCommand("reboot")
 
     def exitPlugin(self):
         self.close()
-
-    def rebootSystem(self):
-        self.session.openWithCallback(self.rebootCallback, MessageBox, "Do you want to reboot now?", MessageBox.TYPE_YESNO)
-
-    def rebootCallback(self, confirmed):
-        if confirmed:
-            self.runCommand("reboot")
 
 
 def Plugins(**kwargs):
     return [
         PluginDescriptor(
             name=PLUGIN_NAME,
-            description=f"Installer for T2MI Abertis configuration (Version {PLUGIN_VERSION})",  # Prikazivanje verzije u opisu plugina
+            description=f"Installer for T2MI Abertis configuration (Version {PLUGIN_VERSION})",
             where=[PluginDescriptor.WHERE_PLUGINMENU, PluginDescriptor.WHERE_EXTENSIONSMENU],
             icon=ICON_PATH,
             fnc=lambda session, **kwargs: session.open(CiefpSettingsT2miAbertis)
