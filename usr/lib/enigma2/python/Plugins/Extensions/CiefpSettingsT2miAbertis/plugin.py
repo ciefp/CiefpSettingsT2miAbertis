@@ -7,11 +7,10 @@ from Screens.Screen import Screen
 from Components.ActionMap import ActionMap
 from Components.Label import Label
 from Components.Button import Button
-from Components.Pixmap import Pixmap
 from Tools.Directories import resolveFilename, SCOPE_PLUGINS
 from Plugins.Plugin import PluginDescriptor
 
-PLUGIN_VERSION = "1.3"
+PLUGIN_VERSION = "1.4"
 PLUGIN_NAME = "CiefpSettingsT2miAbertis"
 ICON_PATH = "/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/icon.png"
 ASTRA_CONF_URL = "https://raw.githubusercontent.com/ciefp/ciefpsettings-enigma2-Abertis-t2mi/refs/heads/main/astra%20abertis%20script%20arm%20(%20UHD%204K%20)/etc/astra/astra.conf"
@@ -66,6 +65,7 @@ class CiefpSettingsT2miAbertis(Screen):
             "Do you want to proceed with the installation?"
         )
         self["status"].setText("Awaiting your choice.")
+        
     def runUpdate(self):
         try:
             self["status"].setText("Updating plugin...")
@@ -79,10 +79,11 @@ class CiefpSettingsT2miAbertis(Screen):
         try:
             self["info"].setText("Checking system compatibility...")
             system_info = platform.machine()
-            is_py3 = (platform.python_version_tuple()[0] == '3')
-
-            if not is_py3:
-                self["status"].setText("Python3 is required for this plugin.")
+            py_ver = platform.python_version_tuple()
+            python_version = f"{py_ver[0]}.{py_ver[1]}.{py_ver[2]}"
+            
+            if py_ver[0] != '3' or int(py_ver[1]) < 9:
+                self["status"].setText(f"Python 3.9+ is required. Current version: {python_version}.")
                 return
 
             if system_info in ["arm", "armv7", "armv7l"]:
@@ -91,30 +92,20 @@ class CiefpSettingsT2miAbertis(Screen):
                 self["status"].setText("Unsupported architecture: " + system_info)
                 return
 
+            self["info"].setText(f"Detected Python version: {python_version}. Adjusting installation accordingly.")
+
             self["info"].setText("Installing Astra-SM...")
-            self.runCommand("opkg update && opkg install astra-sm")
+            result = self.runCommand("opkg update && opkg install astra-sm")
+            if "not found" in result or "failed" in result.lower():
+                self["status"].setText("Failed to install Astra-SM. Check opkg sources.")
+                return
             self["status"].setText("Astra-SM installed successfully.")
             installed_files.append("astra-sm")
 
-            self["info"].setText("Downloading and copying configuration files...")
-
-            self.downloadAndSave(SYSCTL_CONF_URL, "/etc/sysctl.conf")
-            installed_files.append("sysctl.conf")
-
-            os.makedirs("/etc/astra", exist_ok=True)
-            self.downloadAndSave(ASTRA_CONF_URL, "/etc/astra/astra.conf")
-            installed_files.append("astra.conf")
-
-            os.makedirs("/etc/astra/scripts", exist_ok=True)
-            self.downloadAndSave(ABERTIS_ARM_URL, "/etc/astra/scripts/abertis", chmod=0o755)
-            installed_files.append("abertis")
-
-            os.makedirs("/etc/tuxbox/config/oscam-emu", exist_ok=True)
-            self.downloadAndSave(SOFTCAM_KEY_URL, "/etc/tuxbox/config/softcam.key")
-            installed_files.append("softcam.key (/etc/tuxbox/config/)")
-
-            self.downloadAndSave(SOFTCAM_KEY_URL, "/etc/tuxbox/config/oscam-emu/softcam.key")
-            installed_files.append("softcam.key (/etc/tuxbox/config/oscam-emu/)")
+            if py_ver[1] == '12' and py_ver[2] == '4':
+                self.installFilesForPythonVersion(python_version, system_info, specific=True)
+            else:
+                self.installFilesForPythonVersion(python_version, system_info)
 
             self["info"].setText("\n".join([
                 "Installation successful! Installed files:",
@@ -126,6 +117,45 @@ class CiefpSettingsT2miAbertis(Screen):
         except Exception as e:
             self["status"].setText(f"Error: {str(e)}")
 
+    def installFilesForPythonVersion(self, python_version, system_info, specific=False):
+        installed_files = []
+
+        try:
+            self["info"].setText(f"Installing configuration files for Python {python_version}...")
+
+            if not self.downloadAndSave(SYSCTL_CONF_URL, "/etc/sysctl.conf"):
+                self["status"].setText("Failed to download sysctl.conf.")
+                return
+            installed_files.append("sysctl.conf")
+
+            os.makedirs("/etc/astra", exist_ok=True)
+            if not self.downloadAndSave(ASTRA_CONF_URL, "/etc/astra/astra.conf"):
+                self["status"].setText("Failed to download astra.conf.")
+                return
+            installed_files.append("astra.conf")
+
+            os.makedirs("/etc/astra/scripts", exist_ok=True)
+            script_url = ABERTIS_ARM_URL if system_info == "arm" else ABERTIS_MIPS_URL
+            if not self.downloadAndSave(script_url, "/etc/astra/scripts/abertis", chmod=0o755):
+                self["status"].setText("Failed to download Abertis script.")
+                return
+            installed_files.append("abertis")
+
+            if specific:
+                os.makedirs("/etc/tuxbox/config/oscam-emu", exist_ok=True)
+                self.downloadAndSave(SOFTCAM_KEY_URL, "/etc/tuxbox/config/softcam.key")
+                installed_files.append("softcam.key (/etc/tuxbox/config/)")
+
+                self.downloadAndSave(SOFTCAM_KEY_URL, "/etc/tuxbox/config/oscam-emu/softcam.key")
+                installed_files.append("softcam.key (/etc/tuxbox/config/oscam-emu/)")
+
+            self["info"].setText("All files installed successfully for Python version " + python_version)
+            return installed_files
+
+        except Exception as e:
+            self["status"].setText(f"Error during file installation: {str(e)}")
+            return []
+
     def downloadAndSave(self, url, dest_path, chmod=None):
         try:
             self["info"].setText(f"Downloading {dest_path}...")
@@ -135,20 +165,24 @@ class CiefpSettingsT2miAbertis(Screen):
                 os.chmod(dest_path, chmod)
 
             self["status"].setText(f"{dest_path} saved successfully.")
+            return True
         except Exception as e:
             self["status"].setText(f"Error: {str(e)}")
+            return False
 
     def runCommand(self, command):
         try:
             process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdout, stderr = process.communicate()
             if process.returncode != 0:
-                raise Exception(stderr.decode("utf-8"))
+                return stderr.decode("utf-8")
+            return stdout.decode("utf-8")
         except Exception as e:
-            self["status"].setText(f"Error: {str(e)}")
+            return f"Error executing command: {str(e)}"
+
     def rebootPrompt(self, confirmed):
         if confirmed:
-            self.close()  # Zatvori plugin pre restarta
+            self.close()
             self.runCommand("reboot")
 
     def exitPlugin(self):
