@@ -9,27 +9,23 @@ from Components.Label import Label
 from Components.Button import Button
 from Tools.Directories import resolveFilename, SCOPE_PLUGINS
 from Plugins.Plugin import PluginDescriptor
+import shutil  # Dodajte ovaj red
 
-PLUGIN_VERSION = "1.4"
+PLUGIN_VERSION = "1.5"
 PLUGIN_NAME = "CiefpSettingsT2miAbertis"
 ICON_PATH = "/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/icon.png"
-ASTRA_CONF_URL = "https://raw.githubusercontent.com/ciefp/ciefpsettings-enigma2-Abertis-t2mi/refs/heads/main/astra%20abertis%20script%20arm%20(%20UHD%204K%20)/etc/astra/astra.conf"
-SYSCTL_CONF_URL = "https://raw.githubusercontent.com/ciefp/ciefpsettings-enigma2-Abertis-t2mi/refs/heads/main/etc/sysctl.conf"
-SOFTCAM_KEY_URL = "https://raw.githubusercontent.com/MOHAMED19OS/SoftCam_Emu/refs/heads/main/SoftCam.Key"
-ABERTIS_ARM_URL = "https://github.com/ciefp/ciefpsettings-enigma2-Abertis-t2mi/raw/refs/heads/main/astra%20abertis%20script%20arm%20(%20UHD%204K%20)/etc/astra/scripts/abertis"
-ABERTIS_MIPS_URL = "https://github.com/ciefp/ciefpsettings-enigma2-Abertis-t2mi/raw/refs/heads/main/astra%20abertis%20script%20mips%20(%20HD%20)/etc/astra/scripts/abertis"
 
 class CiefpSettingsT2miAbertis(Screen):
     skin = """
     <screen name="CiefpSettingsT2miAbertis" position="center,center" size="1200,600" title="CiefpSettings T2mi Abertis Installer">
         <!-- Menu section -->
-        <widget name="info" position="10,10" size="590,450" font="Regular;22" valign="center" halign="left" />
+        <widget name="info" position="10,10" size="580,450" font="Regular;22" valign="center" halign="left" />
 
         <!-- Background section -->
-        <ePixmap pixmap="/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/background.png" position="610,10" size="600,450" alphatest="on" />
+        <ePixmap pixmap="/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/background.png" position="590,10" size="600,450" alphatest="on" />
 
         <!-- Status section -->
-        <widget name="status" position="10,460" size="1180,60" font="Bold;22" valign="center" halign="center" backgroundColor="#cccccc" foregroundColor="#000000" />
+        <widget name="status" position="10,470" size="1180,55" font="Bold;22" valign="center" halign="center" backgroundColor="#cccccc" foregroundColor="#000000" />
         <widget name="key_red" position="10,530" size="380,60" font="Bold;24" halign="center" backgroundColor="#9F1313" foregroundColor="#000000" />
         <widget name="key_green" position="410,530" size="380,60" font="Bold;24" halign="center" backgroundColor="#1F771F" foregroundColor="#000000" />
         <widget name="key_yellow" position="810,530" size="380,60" font="Bold;24" halign="center" backgroundColor="#D6A200" foregroundColor="#000000" />
@@ -74,109 +70,214 @@ class CiefpSettingsT2miAbertis(Screen):
         except Exception as e:
             self["status"].setText(f"Update failed: {str(e)}")
 
-    def startInstallation(self):
-        installed_files = []
+    def createRequiredDirectories(self):
         try:
-            self["info"].setText("Checking system compatibility...")
-            system_info = platform.machine()
-            py_ver = platform.python_version_tuple()
-            python_version = f"{py_ver[0]}.{py_ver[1]}.{py_ver[2]}"
-            
-            if py_ver[0] != '3' or int(py_ver[1]) < 9:
-                self["status"].setText(f"Python 3.9+ is required. Current version: {python_version}.")
+            print("Creating required directories...")
+            self["info"].setText("Creating required directories...")
+
+            # Lista potrebnih direktorija
+            required_directories = [
+                "/etc/astra",
+                "/etc/astra/scripts",
+                "/etc/tuxbox/config",
+                "/etc/tuxbox/config/oscam-emu"
+            ]
+
+            # Stvaranje direktorija
+            for directory in required_directories:
+                if not os.path.exists(directory):
+                    try:
+                        os.makedirs(directory, exist_ok=True)
+                        print(f"Created directory: {directory}")
+                    except PermissionError:
+                        self["status"].setText(f"Permission denied: Unable to create directory {directory}.")
+                        print(f"Permission denied: Unable to create directory {directory}.")
+                        return False
+                    except Exception as e:
+                        self["status"].setText(f"Error creating directory {directory}: {str(e)}")
+                        print(f"Error creating directory {directory}: {str(e)}")
+                        return False
+
+            self["info"].setText("All required directories created successfully.")
+            print("All required directories created successfully.")
+            return True
+
+        except Exception as e:
+            self["status"].setText(f"Error during directory creation: {str(e)}")
+            print(f"Error during directory creation: {str(e)}")
+            return False
+
+    def isFileSame(self, source_path, dest_path):
+        try:
+            if not os.path.exists(source_path) or not os.path.exists(dest_path):
+                return False
+
+            with open(source_path, 'rb') as src_file, open(dest_path, 'rb') as dst_file:
+                return src_file.read() == dst_file.read()
+
+        except Exception as e:
+            self["status"].setText(f"Error comparing files: {str(e)}")
+            return False
+
+    def startInstallation(self):
+        try:
+            print("Starting installation process...")
+            self["info"].setText("Cleaning previous installation...")
+            self.cleanPreviousInstallation()
+
+            # Stvaranje potrebnih direktorija
+            if not self.createRequiredDirectories():
+                self["status"].setText("Failed to create required directories. Installation aborted.")
+                print("Failed to create required directories. Installation aborted.")
                 return
 
-            if system_info in ["arm", "armv7", "armv7l"]:
-                system_info = "arm"
-            elif system_info not in ["mips"]:
-                self["status"].setText("Unsupported architecture: " + system_info)
+            # Instalacija novih datoteka
+            installed_files = self.installFilesFromPluginData()
+            if not installed_files:
+                self["status"].setText("Failed to install new files.")
+                print("Failed to install new files.")
                 return
 
-            self["info"].setText(f"Detected Python version: {python_version}. Adjusting installation accordingly.")
-
-            self["info"].setText("Installing Astra-SM...")
-            result = self.runCommand("opkg update && opkg install astra-sm")
-            if "not found" in result or "failed" in result.lower():
-                self["status"].setText("Failed to install Astra-SM. Check opkg sources.")
-                return
-            self["status"].setText("Astra-SM installed successfully.")
-            installed_files.append("astra-sm")
-
-            if py_ver[1] == '12' and py_ver[2] == '4':
-                self.installFilesForPythonVersion(python_version, system_info, specific=True)
-            else:
-                self.installFilesForPythonVersion(python_version, system_info)
-
+            # Prikazivanje završnog statusa
             self["info"].setText("\n".join([
                 "Installation successful! Installed files:",
                 *[f"- {file}" for file in installed_files],
                 "\nInstallation complete. Please reboot your system."
             ]))
+            print("Installation complete. Please reboot your system.")
 
-            self.session.openWithCallback(self.rebootPrompt, MessageBox, "Installation complete! Do you want to reboot now?", MessageBox.TYPE_YESNO)
+            # Potvrda ponovnog pokretanja sustava
+            self.session.openWithCallback(self.rebootPrompt, MessageBox,
+                                          "Installation complete! Do you want to reboot now?", MessageBox.TYPE_YESNO)
+
         except Exception as e:
             self["status"].setText(f"Error: {str(e)}")
+            print(f"Error during installation: {str(e)}")
 
-    def installFilesForPythonVersion(self, python_version, system_info, specific=False):
-        installed_files = []
-
+    def cleanPreviousInstallation(self):
         try:
-            self["info"].setText(f"Installing configuration files for Python {python_version}...")
+            print("Cleaning previous installation...")
+            cleanup_paths = [
+                "/etc/astra/astra.conf",
+                "/etc/sysctl.conf",
+                "/etc/astra/scripts/abertis",
+                "/etc/tuxbox/config/softcam.key",
+                "/etc/tuxbox/config/oscam-emu/softcam.key"
+            ]
 
-            if not self.downloadAndSave(SYSCTL_CONF_URL, "/etc/sysctl.conf"):
-                self["status"].setText("Failed to download sysctl.conf.")
-                return
-            installed_files.append("sysctl.conf")
+            for path in cleanup_paths:
+                if os.path.exists(path):
+                    os.remove(path)
+                    print(f"Removed old file: {path}")
 
-            os.makedirs("/etc/astra", exist_ok=True)
-            if not self.downloadAndSave(ASTRA_CONF_URL, "/etc/astra/astra.conf"):
-                self["status"].setText("Failed to download astra.conf.")
-                return
-            installed_files.append("astra.conf")
+            self["info"].setText("Previous installation cleaned successfully.")
+            print("Previous installation cleaned successfully.")
+        except Exception as e:
+            self["status"].setText(f"Error cleaning previous installation: {str(e)}")
+            print(f"Error cleaning previous installation: {str(e)}")
 
-            os.makedirs("/etc/astra/scripts", exist_ok=True)
-            script_url = ABERTIS_ARM_URL if system_info == "arm" else ABERTIS_MIPS_URL
-            if not self.downloadAndSave(script_url, "/etc/astra/scripts/abertis", chmod=0o755):
-                self["status"].setText("Failed to download Abertis script.")
-                return
-            installed_files.append("abertis")
+    def installFilesFromPluginData(self):
+        installed_files = []
+        try:
+            print("Installing configuration files...")
+            self["info"].setText("Installing configuration files...")
+            data_dir = resolveFilename(SCOPE_PLUGINS, "Extensions/CiefpSettingsT2miAbertis/data/")
 
-            if specific:
-                os.makedirs("/etc/tuxbox/config/oscam-emu", exist_ok=True)
-                self.downloadAndSave(SOFTCAM_KEY_URL, "/etc/tuxbox/config/softcam.key")
-                installed_files.append("softcam.key (/etc/tuxbox/config/)")
+            # Instalacija sysctl.conf
+            dest_path = "/etc/sysctl.conf"
+            source_path = os.path.join(data_dir, "sysctl.conf")
+            if not os.path.exists(dest_path) or not self.isFileSame(source_path, dest_path):
+                print(f"Copying {source_path} to {dest_path}...")
+                if not self.copyFile(source_path, dest_path):
+                    self["status"].setText(f"Failed to copy {source_path} to {dest_path}.")
+                    print(f"Failed to copy {source_path} to {dest_path}.")
+                    return []
+                installed_files.append("sysctl.conf")
+                print(f"{source_path} copied successfully to {dest_path}.")
 
-                self.downloadAndSave(SOFTCAM_KEY_URL, "/etc/tuxbox/config/oscam-emu/softcam.key")
-                installed_files.append("softcam.key (/etc/tuxbox/config/oscam-emu/)")
+            # Instalacija astra.conf
+            dest_path = "/etc/astra/astra.conf"
+            source_path = os.path.join(data_dir, "astra.conf")
+            if not os.path.exists(dest_path) or not self.isFileSame(source_path, dest_path):
+                print(f"Copying {source_path} to {dest_path}...")
+                if not self.copyFile(source_path, dest_path):
+                    self["status"].setText(f"Failed to copy {source_path} to {dest_path}.")
+                    print(f"Failed to copy {source_path} to {dest_path}.")
+                    return []
+                installed_files.append("astra.conf")
+                print(f"{source_path} copied successfully to {dest_path}.")
 
-            self["info"].setText("All files installed successfully for Python version " + python_version)
+            # Instalacija Abertis skripte (za ARM ili MIPS)
+            system_info = platform.machine()
+            if system_info in ["arm", "armv7", "armv7l"]:
+                script_arch = "arm"
+            elif system_info == "mips":
+                script_arch = "mips"
+            else:
+                self["status"].setText(f"Unsupported architecture: {system_info}")
+                print(f"Unsupported architecture: {system_info}")
+                return []
+
+            script_dir = os.path.join(data_dir, script_arch)
+            source_path = os.path.join(script_dir, "abertis")
+            dest_path = "/etc/astra/scripts/abertis"
+            if not os.path.exists(dest_path) or not self.isFileSame(source_path, dest_path):
+                print(f"Copying {source_path} to {dest_path}...")
+                if not self.copyFile(source_path, dest_path, chmod=0o755):
+                    self["status"].setText(f"Failed to copy {source_path} to {dest_path}.")
+                    print(f"Failed to copy {source_path} to {dest_path}.")
+                    return []
+                installed_files.append("abertis")
+                print(f"{source_path} copied successfully to {dest_path}.")
+
+            # Instalacija SoftCam.Key
+            softcam_dest_paths = [
+                "/etc/tuxbox/config/softcam.key",
+                "/etc/tuxbox/config/oscam-emu/softcam.key"
+            ]
+            source_path = os.path.join(data_dir, "SoftCam.Key")
+            for dest_path in softcam_dest_paths:
+                if not os.path.exists(dest_path) or not self.isFileSame(source_path, dest_path):
+                    print(f"Copying {source_path} to {dest_path}...")
+                    if not self.copyFile(source_path, dest_path):
+                        self["status"].setText(f"Failed to copy {source_path} to {dest_path}.")
+                        print(f"Failed to copy {source_path} to {dest_path}.")
+                        return []
+                    installed_files.append(f"softcam.key ({dest_path})")
+                    print(f"{source_path} copied successfully to {dest_path}.")
+
+            self["info"].setText("All files installed successfully.")
+            print("All files installed successfully.")
             return installed_files
 
         except Exception as e:
             self["status"].setText(f"Error during file installation: {str(e)}")
+            print(f"Error during file installation: {str(e)}")
             return []
 
-    def downloadAndSave(self, url, dest_path, chmod=None):
+    def copyFile(self, source_path, dest_path, chmod=None):
         try:
-            self["info"].setText(f"Downloading {dest_path}...")
-            urllib.request.urlretrieve(url, dest_path)
-
+            print(f"Creating destination directory for {dest_path}...")
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)  # Stvaranje odredišnog direktorija
+            print(f"Copying {source_path} to {dest_path}...")
+            shutil.copy2(source_path, dest_path)  # Kopiranje datoteke sa čuvanjem atributa
             if chmod:
                 os.chmod(dest_path, chmod)
-
-            self["status"].setText(f"{dest_path} saved successfully.")
+            print(f"{source_path} copied successfully to {dest_path}.")
             return True
         except Exception as e:
-            self["status"].setText(f"Error: {str(e)}")
+            self["status"].setText(f"Error copying {source_path} to {dest_path}: {str(e)}")
+            print(f"Error copying {source_path} to {dest_path}: {str(e)}")
             return False
 
     def runCommand(self, command):
         try:
             process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdout, stderr = process.communicate()
+
             if process.returncode != 0:
-                return stderr.decode("utf-8")
-            return stdout.decode("utf-8")
+                return stderr.decode("utf-8", errors="ignore")  # Ignoriraj greške kod dekodiranja
+            return stdout.decode("utf-8", errors="ignore")
         except Exception as e:
             return f"Error executing command: {str(e)}"
 
@@ -187,7 +288,6 @@ class CiefpSettingsT2miAbertis(Screen):
 
     def exitPlugin(self):
         self.close()
-
 
 def Plugins(**kwargs):
     return [
