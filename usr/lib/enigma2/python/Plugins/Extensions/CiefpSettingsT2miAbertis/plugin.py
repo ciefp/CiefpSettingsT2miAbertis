@@ -16,8 +16,8 @@ PLUGIN_NAME = "CiefpSettingsT2miAbertis"
 ICON_PATH = "/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/icon.png"
 
 class CiefpSettingsT2miAbertis(Screen):
-    skin = """
-    <screen name="CiefpSettingsT2miAbertis" position="center,center" size="1200,600" title="CiefpSettings T2mi Abertis Installer">
+    skin = """ 
+    <screen name="CiefpSettingsT2miAbertis" position="center,center" size="1200,600" title="CiefpSettings T2mi Abertis Installer (v{version}) ">
         <!-- Menu section -->
         <widget name="info" position="10,10" size="580,450" font="Regular;22" valign="center" halign="left" />
 
@@ -30,7 +30,7 @@ class CiefpSettingsT2miAbertis(Screen):
         <widget name="key_green" position="410,530" size="380,60" font="Bold;24" halign="center" backgroundColor="#1F771F" foregroundColor="#000000" />
         <widget name="key_yellow" position="810,530" size="380,60" font="Bold;24" halign="center" backgroundColor="#D6A200" foregroundColor="#000000" />
     </screen>
-    """
+    """.format(version=PLUGIN_VERSION)
 
     def __init__(self, session):
         self.session = session
@@ -130,6 +130,17 @@ class CiefpSettingsT2miAbertis(Screen):
                 self["status"].setText("Failed to create required directories. Installation aborted.")
                 print("Failed to create required directories. Installation aborted.")
                 return
+
+            # Instalacija Astra-SM
+            self["info"].setText("Installing Astra-SM...")
+            print("Installing Astra-SM...")
+            result = self.runCommand("opkg update && opkg install astra-sm")
+            if "not found" in result or "failed" in result.lower():
+                self["status"].setText("Failed to install Astra-SM. Check opkg sources.")
+                print("Failed to install Astra-SM. Check opkg sources.")
+                return
+            self["status"].setText("Astra-SM installed successfully.")
+            print("Astra-SM installed successfully.")
 
             # Instalacija novih datoteka
             installed_files = self.installFilesFromPluginData()
