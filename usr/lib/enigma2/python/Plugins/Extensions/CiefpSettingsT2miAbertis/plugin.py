@@ -12,7 +12,7 @@ from Plugins.Plugin import PluginDescriptor
 import shutil
 import time
 
-PLUGIN_VERSION = "1.6"
+PLUGIN_VERSION = "1.7"
 PLUGIN_NAME = "CiefpSettingsT2miAbertis"
 ICON_PATH = "/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/icon.png"
 
