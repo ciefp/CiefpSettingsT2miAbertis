@@ -5,8 +5,8 @@ import json
 import re
 from datetime import datetime
 from urllib.request import urlopen
+from enigma import eConsoleAppContainer, eDVBDB, eTimer
 
-from enigma import eConsoleAppContainer, eDVBDB
 
 from Screens.MessageBox import MessageBox
 from Screens.Screen import Screen
@@ -45,6 +45,14 @@ class CiefpSettingsT2miAbertis(Screen):
         Screen.__init__(self, session)
         self._container = None
         self._on_cmd_done = None
+        # Retry copy on clean install (astra-sm may auto-start and lock script briefly)
+        self._copy_attempt = 0
+        self._max_copy_attempts = 2  # ukupno 2 pokušaja
+        self._retry_timer = eTimer()
+        try:
+            self._retry_timer_conn = self._retry_timer.timeout.connect(self._retryCopyNow)  # noviji imidži
+        except Exception:
+            self._retry_timer.callback.append(self._retryCopyNow)  # stariji imidži
         self.setupUI()
         self.showPrompt()
 
@@ -119,6 +127,7 @@ class CiefpSettingsT2miAbertis(Screen):
         self["status"].setText("Update complete." if retval == 0 else "Update failed (code %d)." % retval)
 
     def startInstallation(self):
+        self._copy_attempt = 0
         system_info = platform.machine()
         if system_info not in ["mips", "arm", "armv7", "armv7l"]:
             self["status"].setText("Unsupported architecture: %s" % system_info)
@@ -153,29 +162,45 @@ class CiefpSettingsT2miAbertis(Screen):
         self.runCommandAsync(stop_cmd, done_cb=self._copyPluginFiles, status_text="Stopping Astra-SM...")
 
     def _copyPluginFiles(self, retval):
+        self._copy_attempt += 1
         try:
-            self["info"].setText("Copying configuration files...")
+            self["info"].setText(
+                "Copying configuration files... (attempt %d/%d)" % (self._copy_attempt, self._max_copy_attempts))
             self["status"].setText("Copying files...")
 
             for d in ["/etc/astra", "/etc/astra/scripts", "/etc/tuxbox/config", "/etc/tuxbox/config/oscam-emu"]:
                 os.makedirs(d, exist_ok=True)
 
             data_dir = resolveFilename(SCOPE_PLUGINS, "Extensions/CiefpSettingsT2miAbertis/data/")
+
             shutil.copy2(os.path.join(data_dir, "sysctl.conf"), "/etc/sysctl.conf")
             shutil.copy2(os.path.join(data_dir, "astra.conf"), "/etc/astra/astra.conf")
 
             system_info = platform.machine()
-            script_arch = "arm" if system_info in ["arm", "armv7", "armv7l"] else "mips" if system_info == "mips" else None
+            script_arch = "arm" if system_info in ["arm", "armv7",
+                                                   "armv7l"] else "mips" if system_info == "mips" else None
             if not script_arch:
                 raise Exception("Unsupported architecture: %s" % system_info)
 
-            self.safe_copy_executable(os.path.join(data_dir, script_arch, "abertis"), "/etc/astra/scripts/abertis", mode=0o755)
+            # OVO zna da “zapne” na clean install -> retry
+            self.safe_copy_executable(os.path.join(data_dir, script_arch, "abertis"), "/etc/astra/scripts/abertis",
+                                      mode=0o755)
 
             src_softcam = os.path.join(data_dir, "SoftCam.Key")
             shutil.copy2(src_softcam, "/etc/tuxbox/config/softcam.key")
             shutil.copy2(src_softcam, "/etc/tuxbox/config/oscam-emu/softcam.key")
 
         except Exception as e:
+            if self._copy_attempt < self._max_copy_attempts:
+                self["status"].setText("Copy failed: %s. Retrying in 30s..." % str(e))
+                self["info"].setText("Waiting 30 seconds then retry copy (attempt %d/%d)..." % (
+                self._copy_attempt + 1, self._max_copy_attempts))
+                try:
+                    self._retry_timer.start(30000, True)  # 30s one-shot (noviji)
+                except Exception:
+                    self._retry_timer.start(30000, 1)  # 30s one-shot (stariji)
+                return
+
             self["status"].setText("Copy error: %s" % str(e))
             self.runCommandAsync("if [ -x /etc/init.d/astra-sm ]; then /etc/init.d/astra-sm start >/dev/null 2>&1; fi;",
                                  status_text="Starting Astra-SM...")
@@ -185,6 +210,15 @@ class CiefpSettingsT2miAbertis(Screen):
         self.runCommandAsync("if [ -x /etc/init.d/astra-sm ]; then /etc/init.d/astra-sm start >/dev/null 2>&1; fi;",
                              done_cb=self._installFinish,
                              status_text="Starting Astra-SM...")
+
+    def _retryCopyNow(self):
+        # Stop astra once more then retry copying
+        self["status"].setText("Retrying copy...")
+        stop_cmd = (
+            "if [ -x /etc/init.d/astra-sm ]; then /etc/init.d/astra-sm stop >/dev/null 2>&1; fi; "
+            "killall -9 astra-sm >/dev/null 2>&1; "
+        )
+        self.runCommandAsync(stop_cmd, done_cb=self._copyPluginFiles, status_text="Stopping Astra-SM (retry)...")
 
     def _installFinish(self, retval):
         self["status"].setText("Install done. Press BLUE for Motor Settings list.")
