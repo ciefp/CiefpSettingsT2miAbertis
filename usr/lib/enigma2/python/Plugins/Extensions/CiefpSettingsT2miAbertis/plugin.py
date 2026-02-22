@@ -21,9 +21,7 @@ PLUGIN_VERSION = "1.9"
 PLUGIN_NAME = "CiefpSettingsT2miAbertis"
 ICON_PATH = "/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/icon.png"
 
-# Motor settings ZIPs repo (multiple zips exist; we pick the newest date for the chosen prefix)
 GITHUB_ZIPPED_ROOT_API = "https://api.github.com/repos/ciefp/ciefpsettings-enigma2-zipped/contents/"
-MOTOR_ZIP_PREFIX = "ciefp-E2-75E-34W-"
 MOTOR_ZIP_PATTERN = re.compile(r"^ciefp-E2-75E-34W-(\d{2}\.\d{2}\.\d{4})\.zip$", re.IGNORECASE)
 
 
@@ -45,10 +43,8 @@ class CiefpSettingsT2miAbertis(Screen):
     def __init__(self, session):
         self.session = session
         Screen.__init__(self, session)
-
         self._container = None
         self._on_cmd_done = None
-
         self.setupUI()
         self.showPrompt()
 
@@ -71,11 +67,8 @@ class CiefpSettingsT2miAbertis(Screen):
     def showPrompt(self):
         self["info"].setText(
             "GREEN (Install):\n"
-            "- Install Astra-SM\n"
-            "- Stop Astra-SM, copy config/scripts, start Astra-SM\n"
-            "- Install config files (sysctl.conf, astra.conf)\n"
-            "- SoftCam.Key\n"
-            "- Abertis script\n\n"
+            "- Check if Astra-SM is already installed\n"
+            "- Stop Astra-SM, copy config/scripts, start Astra-SM\n\n"
             "BLUE (Motor Settings):\n"
             "- Download latest 'ciefp-E2-75E-34W' ZIP from GitHub\n"
             "- Install to /etc/enigma2 (+ satellites.xml if present)\n"
@@ -86,17 +79,12 @@ class CiefpSettingsT2miAbertis(Screen):
         )
         self["status"].setText("Awaiting your choice.")
 
-    # -------------------------
-    # Non-blocking shell runner
-    # -------------------------
     def runCommandAsync(self, command, done_cb=None, status_text=None):
         if status_text:
             self["status"].setText(status_text)
-
         if self._container is not None:
             self["status"].setText("Busy, please wait...")
             return
-
         self._on_cmd_done = done_cb
         self._container = eConsoleAppContainer()
         self._container.appClosed.append(self._commandFinished)
@@ -117,45 +105,44 @@ class CiefpSettingsT2miAbertis(Screen):
             except Exception as e:
                 self["status"].setText("Callback error: %s" % str(e))
 
-    # -------------------------
-    # Safe copy for executables
-    # -------------------------
     def safe_copy_executable(self, src, dest, mode=0o755):
         tmp = dest + ".new"
         shutil.copy2(src, tmp)
         os.chmod(tmp, mode)
         os.rename(tmp, dest)
 
-    # -----------------
-    # UPDATE (yellow)
-    # -----------------
     def runUpdate(self):
         cmd = 'wget -q "--no-check-certificate" https://raw.githubusercontent.com/ciefp/CiefpSettingsT2miAbertis/main/installer.sh -O - | /bin/sh'
         self.runCommandAsync(cmd, done_cb=self._updateDone, status_text="Updating plugin...")
 
     def _updateDone(self, retval):
-        if retval == 0:
-            self["status"].setText("Update complete.")
-        else:
-            self["status"].setText("Update failed (code %d)." % retval)
+        self["status"].setText("Update complete." if retval == 0 else "Update failed (code %d)." % retval)
 
-    # -----------------
-    # INSTALL (green)
-    # -----------------
     def startInstallation(self):
         system_info = platform.machine()
         if system_info not in ["mips", "arm", "armv7", "armv7l"]:
             self["status"].setText("Unsupported architecture: %s" % system_info)
             return
 
-        self["status"].setText("Installation in progress, please wait...")
-        self["info"].setText("Installing Astra-SM (opkg)...")
-
+        # Avoid long opkg update if astra-sm is already installed
+        self["info"].setText("Checking if Astra-SM is already installed...")
         self.runCommandAsync(
-            "opkg update && opkg install astra-sm",
-            done_cb=self._astraInstalledStopForCopy,
-            status_text="Installing Astra-SM..."
+            "opkg list-installed 2>/dev/null | grep -qi '^astra-sm '",
+            done_cb=self._astraCheckDone,
+            status_text="Checking Astra-SM..."
         )
+
+    def _astraCheckDone(self, retval):
+        if retval == 0:
+            self["info"].setText("Astra-SM already installed. Proceeding...")
+            self._astraInstalledStopForCopy(0)
+        else:
+            self["info"].setText("Installing Astra-SM (opkg)...")
+            self.runCommandAsync(
+                "opkg install astra-sm",
+                done_cb=self._astraInstalledStopForCopy,
+                status_text="Installing Astra-SM..."
+            )
 
     def _astraInstalledStopForCopy(self, retval):
         self["info"].setText("Stopping Astra-SM to copy files safely...")
@@ -174,7 +161,6 @@ class CiefpSettingsT2miAbertis(Screen):
                 os.makedirs(d, exist_ok=True)
 
             data_dir = resolveFilename(SCOPE_PLUGINS, "Extensions/CiefpSettingsT2miAbertis/data/")
-
             shutil.copy2(os.path.join(data_dir, "sysctl.conf"), "/etc/sysctl.conf")
             shutil.copy2(os.path.join(data_dir, "astra.conf"), "/etc/astra/astra.conf")
 
@@ -183,9 +169,7 @@ class CiefpSettingsT2miAbertis(Screen):
             if not script_arch:
                 raise Exception("Unsupported architecture: %s" % system_info)
 
-            src_abertis = os.path.join(data_dir, script_arch, "abertis")
-            dst_abertis = "/etc/astra/scripts/abertis"
-            self.safe_copy_executable(src_abertis, dst_abertis, mode=0o755)
+            self.safe_copy_executable(os.path.join(data_dir, script_arch, "abertis"), "/etc/astra/scripts/abertis", mode=0o755)
 
             src_softcam = os.path.join(data_dir, "SoftCam.Key")
             shutil.copy2(src_softcam, "/etc/tuxbox/config/softcam.key")
@@ -193,18 +177,14 @@ class CiefpSettingsT2miAbertis(Screen):
 
         except Exception as e:
             self["status"].setText("Copy error: %s" % str(e))
-            self.runCommandAsync(
-                "if [ -x /etc/init.d/astra-sm ]; then /etc/init.d/astra-sm start >/dev/null 2>&1; fi;",
-                status_text="Starting Astra-SM..."
-            )
+            self.runCommandAsync("if [ -x /etc/init.d/astra-sm ]; then /etc/init.d/astra-sm start >/dev/null 2>&1; fi;",
+                                 status_text="Starting Astra-SM...")
             return
 
         self["info"].setText("Starting Astra-SM...")
-        self.runCommandAsync(
-            "if [ -x /etc/init.d/astra-sm ]; then /etc/init.d/astra-sm start >/dev/null 2>&1; fi;",
-            done_cb=self._installFinish,
-            status_text="Starting Astra-SM..."
-        )
+        self.runCommandAsync("if [ -x /etc/init.d/astra-sm ]; then /etc/init.d/astra-sm start >/dev/null 2>&1; fi;",
+                             done_cb=self._installFinish,
+                             status_text="Starting Astra-SM...")
 
     def _installFinish(self, retval):
         self["status"].setText("Install done. Press BLUE for Motor Settings list.")
@@ -213,19 +193,13 @@ class CiefpSettingsT2miAbertis(Screen):
             "Next step:\n"
             "- Press BLUE (Motor Settings) to install the latest 'ciefp-E2-75E-34W' channel list and reload settings."
         )
-        self.session.open(
-            MessageBox,
-            "Files copied and Astra-SM restarted.\n\nNow press BLUE (Motor Settings) to install the latest motor list and reload.",
-            MessageBox.TYPE_INFO
-        )
+        self.session.open(MessageBox,
+                          "Files copied and Astra-SM restarted.\n\nNow press BLUE (Motor Settings) to install the latest motor list and reload.",
+                          MessageBox.TYPE_INFO)
 
-    # -------------------------
-    # MOTOR SETTINGS (blue)
-    # -------------------------
     def _pick_latest_motor_zip(self, items):
         best_url = None
         best_dt = None
-
         for it in items:
             name = it.get("name", "")
             m = MOTOR_ZIP_PATTERN.match(name)
@@ -241,22 +215,22 @@ class CiefpSettingsT2miAbertis(Screen):
             if not url:
                 continue
 
-            if best_dt is None and best_url is None:
-                best_dt, best_url = dt, url
-            else:
-                if dt and best_dt and dt > best_dt:
-                    best_dt, best_url = dt, url
-                elif dt and best_dt is None:
-                    best_dt, best_url = dt, url
+            if best_url is None:
+                best_url, best_dt = url, dt
+                continue
 
+            if dt and best_dt:
+                if dt > best_dt:
+                    best_url, best_dt = url, dt
+            elif dt and not best_dt:
+                best_url, best_dt = url, dt
         return best_url, best_dt
 
     def getLatestMotorZipUrl(self):
         try:
             resp = urlopen(GITHUB_ZIPPED_ROOT_API, timeout=20)
             items = json.loads(resp.read().decode("utf-8"))
-            zip_url, zip_dt = self._pick_latest_motor_zip(items)
-            return zip_url, zip_dt
+            return self._pick_latest_motor_zip(items)
         except Exception as e:
             self["status"].setText("GitHub fetch error: %s" % str(e))
             return None, None
@@ -292,30 +266,16 @@ class CiefpSettingsT2miAbertis(Screen):
         if retval != 0:
             self["status"].setText("Motor Settings install failed (code %d)." % retval)
             return
-
         try:
             db = eDVBDB.getInstance()
             db.reloadServicelist()
             db.reloadBouquets()
             self["status"].setText("Motor Settings installed & reloaded successfully.")
-            self["info"].setText(
-                "Motor Settings installed successfully!\n\n"
-                "Done:\n"
-                "- Download ZIP from GitHub\n"
-                "- Install to /etc/enigma2\n"
-                "- Copy satellites.xml (if present)\n"
-                "- Reload servicelist & bouquets\n"
-            )
         except Exception as e:
             self["status"].setText("Installed, but reload failed: %s" % str(e))
 
     def exitPlugin(self):
         self.close()
-
-    def rebootPrompt(self, confirmed):
-        if confirmed:
-            self.close()
-            self.runCommandAsync("reboot", status_text="Rebooting...")
 
 
 def Plugins(**kwargs):
