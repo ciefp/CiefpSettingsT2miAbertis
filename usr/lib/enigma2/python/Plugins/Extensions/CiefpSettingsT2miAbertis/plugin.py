@@ -1,7 +1,13 @@
-import urllib.request
-import subprocess
 import os
 import platform
+import shutil
+import json
+import re
+from datetime import datetime
+from urllib.request import urlopen
+
+from enigma import eConsoleAppContainer, eDVBDB
+
 from Screens.MessageBox import MessageBox
 from Screens.Screen import Screen
 from Components.ActionMap import ActionMap
@@ -9,33 +15,40 @@ from Components.Label import Label
 from Components.Button import Button
 from Tools.Directories import resolveFilename, SCOPE_PLUGINS
 from Plugins.Plugin import PluginDescriptor
-import shutil
-import time
 
-PLUGIN_VERSION = "1.8"
+
+PLUGIN_VERSION = "1.9"
 PLUGIN_NAME = "CiefpSettingsT2miAbertis"
 ICON_PATH = "/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/icon.png"
 
-class CiefpSettingsT2miAbertis(Screen):
-    skin = """ 
-    <screen name="CiefpSettingsT2miAbertis" position="center,center" size="1600,800" title="CiefpSettings T2mi Abertis Installer (v{version}) ">
-        <!-- Menu section -->
-        <widget name="info" position="10,10" size="780,650" font="Regular;24" valign="center" halign="left" />
+# Motor settings ZIPs repo (multiple zips exist; we pick the newest date for the chosen prefix)
+GITHUB_ZIPPED_ROOT_API = "https://api.github.com/repos/ciefp/ciefpsettings-enigma2-zipped/contents/"
+MOTOR_ZIP_PREFIX = "ciefp-E2-75E-34W-"
+MOTOR_ZIP_PATTERN = re.compile(r"^ciefp-E2-75E-34W-(\d{2}\.\d{2}\.\d{4})\.zip$", re.IGNORECASE)
 
-        <!-- Background section -->
+
+class CiefpSettingsT2miAbertis(Screen):
+    skin = """
+    <screen name="CiefpSettingsT2miAbertis" position="center,center" size="1600,800" title="CiefpSettings T2mi Abertis Installer (v{version})">
+        <widget name="info" position="10,10" size="780,650" font="Regular;24" valign="center" halign="left" />
         <ePixmap pixmap="/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/background.png" position="790,10" size="800,650" alphatest="on" />
 
-        <!-- Status section -->
         <widget name="status" position="10,670" size="1580,50" font="Bold;24" valign="center" halign="center" backgroundColor="#cccccc" foregroundColor="#000000" />
-        <widget name="key_red" position="10,730" size="500,60" font="Bold;26" halign="center" backgroundColor="#9F1313" foregroundColor="#000000" />
-        <widget name="key_green" position="550,730" size="500,60" font="Bold;26" halign="center" backgroundColor="#1F771F" foregroundColor="#000000" />
-        <widget name="key_yellow" position="1090,730" size="500,60" font="Bold;26" halign="center" backgroundColor="#D6A200" foregroundColor="#000000" />
+
+        <widget name="key_red" position="10,730" size="370,60" font="Bold;26" halign="center" backgroundColor="#9F1313" foregroundColor="#000000" />
+        <widget name="key_green" position="410,730" size="370,60" font="Bold;26" halign="center" backgroundColor="#1F771F" foregroundColor="#000000" />
+        <widget name="key_yellow" position="810,730" size="370,60" font="Bold;26" halign="center" backgroundColor="#D6A200" foregroundColor="#000000" />
+        <widget name="key_blue" position="1210,730" size="380,60" font="Bold;26" halign="center" backgroundColor="#1E5AA8" foregroundColor="#000000" />
     </screen>
     """.format(version=PLUGIN_VERSION)
 
     def __init__(self, session):
         self.session = session
         Screen.__init__(self, session)
+
+        self._container = None
+        self._on_cmd_done = None
+
         self.setupUI()
         self.showPrompt()
 
@@ -45,307 +58,271 @@ class CiefpSettingsT2miAbertis(Screen):
         self["key_red"] = Button("Exit")
         self["key_green"] = Button("Install")
         self["key_yellow"] = Button("Update")
+        self["key_blue"] = Button("Motor Settings")
+
         self["actions"] = ActionMap(["ColorActions", "SetupActions"], {
             "red": self.exitPlugin,
             "green": self.startInstallation,
             "yellow": self.runUpdate,
+            "blue": self.installMotorSettings,
             "cancel": self.close
         }, -1)
 
     def showPrompt(self):
-        print("[CiefpSettingsT2miAbertis] Showing installation prompt")
         self["info"].setText(
-            "This plugin will install the following components:\n"
-            "- Astra-SM\n"
-            "- Configuration files (sysctl.conf, astra.conf)\n"
+            "GREEN (Install):\n"
+            "- Install Astra-SM\n"
+            "- Stop Astra-SM, copy config/scripts, start Astra-SM\n"
+            "- Install config files (sysctl.conf, astra.conf)\n"
             "- SoftCam.Key\n"
             "- Abertis script\n\n"
-            "Do you want to proceed with the installation?"
+            "BLUE (Motor Settings):\n"
+            "- Download latest 'ciefp-E2-75E-34W' ZIP from GitHub\n"
+            "- Install to /etc/enigma2 (+ satellites.xml if present)\n"
+            "- Reload servicelist & bouquets\n\n"
+            "YELLOW (Update):\n"
+            "- Update installer script\n\n"
+            "Choose an option."
         )
         self["status"].setText("Awaiting your choice.")
 
+    # -------------------------
+    # Non-blocking shell runner
+    # -------------------------
+    def runCommandAsync(self, command, done_cb=None, status_text=None):
+        if status_text:
+            self["status"].setText(status_text)
+
+        if self._container is not None:
+            self["status"].setText("Busy, please wait...")
+            return
+
+        self._on_cmd_done = done_cb
+        self._container = eConsoleAppContainer()
+        self._container.appClosed.append(self._commandFinished)
+        try:
+            self._container.execute(command)
+        except Exception as e:
+            self._container = None
+            self._on_cmd_done = None
+            self["status"].setText("Command start failed: %s" % str(e))
+
+    def _commandFinished(self, retval):
+        cb = self._on_cmd_done
+        self._container = None
+        self._on_cmd_done = None
+        if cb:
+            try:
+                cb(retval)
+            except Exception as e:
+                self["status"].setText("Callback error: %s" % str(e))
+
+    # -------------------------
+    # Safe copy for executables
+    # -------------------------
+    def safe_copy_executable(self, src, dest, mode=0o755):
+        tmp = dest + ".new"
+        shutil.copy2(src, tmp)
+        os.chmod(tmp, mode)
+        os.rename(tmp, dest)
+
+    # -----------------
+    # UPDATE (yellow)
+    # -----------------
     def runUpdate(self):
-        try:
-            print("[CiefpSettingsT2miAbertis] Starting update process")
-            self["status"].setText("Updating plugin...")
-            start_time = time.time()
-            self.runCommand('wget -q "--no-check-certificate" https://raw.githubusercontent.com/ciefp/CiefpSettingsT2miAbertis/main/installer.sh -O - | /bin/sh')
-            print(f"[CiefpSettingsT2miAbertis] Update completed in {time.time() - start_time:.2f} seconds")
+        cmd = 'wget -q "--no-check-certificate" https://raw.githubusercontent.com/ciefp/CiefpSettingsT2miAbertis/main/installer.sh -O - | /bin/sh'
+        self.runCommandAsync(cmd, done_cb=self._updateDone, status_text="Updating plugin...")
+
+    def _updateDone(self, retval):
+        if retval == 0:
             self["status"].setText("Update complete.")
-        except Exception as e:
-            self["status"].setText(f"Update failed: {str(e)}")
-            print(f"[CiefpSettingsT2miAbertis] Update failed: {str(e)}")
+        else:
+            self["status"].setText("Update failed (code %d)." % retval)
 
-    def createRequiredDirectories(self):
-        try:
-            print("[CiefpSettingsT2miAbertis] Starting directory creation")
-            self["info"].setText("Creating required directories...")
-            start_time = time.time()
-
-            required_directories = [
-                "/etc/astra",
-                "/etc/astra/scripts",
-                "/etc/tuxbox/config",
-                "/etc/tuxbox/config/oscam-emu"
-            ]
-
-            for directory in required_directories:
-                if not os.path.exists(directory):
-                    print(f"[CiefpSettingsT2miAbertis] Creating directory: {directory}")
-                    os.makedirs(directory, exist_ok=True)
-                else:
-                    print(f"[CiefpSettingsT2miAbertis] Directory already exists: {directory}")
-
-            elapsed_time = time.time() - start_time
-            self["info"].setText("All required directories created successfully.")
-            print(f"[CiefpSettingsT2miAbertis] Directory creation completed in {elapsed_time:.2f} seconds")
-            return True
-
-        except Exception as e:
-            self["status"].setText(f"Error during directory creation: {str(e)}")
-            print(f"[CiefpSettingsT2miAbertis] Error during directory creation: {str(e)}")
-            return False
-
-    def isFileSame(self, source_path, dest_path):
-        try:
-            if not os.path.exists(source_path) or not os.path.exists(dest_path):
-                return False
-
-            print(f"[CiefpSettingsT2miAbertis] Comparing files: {source_path} and {dest_path}")
-            start_time = time.time()
-            with open(source_path, 'rb') as src_file, open(dest_path, 'rb') as dst_file:
-                result = src_file.read() == dst_file.read()
-            print(f"[CiefpSettingsT2miAbertis] File comparison completed in {time.time() - start_time:.2f} seconds")
-            return result
-
-        except Exception as e:
-            self["status"].setText(f"Error comparing files: {str(e)}")
-            print(f"[CiefpSettingsT2miAbertis] Error comparing files: {str(e)}")
-            return False
-
+    # -----------------
+    # INSTALL (green)
+    # -----------------
     def startInstallation(self):
+        system_info = platform.machine()
+        if system_info not in ["mips", "arm", "armv7", "armv7l"]:
+            self["status"].setText("Unsupported architecture: %s" % system_info)
+            return
+
+        self["status"].setText("Installation in progress, please wait...")
+        self["info"].setText("Installing Astra-SM (opkg)...")
+
+        self.runCommandAsync(
+            "opkg update && opkg install astra-sm",
+            done_cb=self._astraInstalledStopForCopy,
+            status_text="Installing Astra-SM..."
+        )
+
+    def _astraInstalledStopForCopy(self, retval):
+        self["info"].setText("Stopping Astra-SM to copy files safely...")
+        stop_cmd = (
+            "if [ -x /etc/init.d/astra-sm ]; then /etc/init.d/astra-sm stop >/dev/null 2>&1; fi; "
+            "killall -9 astra-sm >/dev/null 2>&1; "
+        )
+        self.runCommandAsync(stop_cmd, done_cb=self._copyPluginFiles, status_text="Stopping Astra-SM...")
+
+    def _copyPluginFiles(self, retval):
         try:
-            print("[CiefpSettingsT2miAbertis] Starting installation process")
-            self["info"].setText("Cleaning previous installation...")
-            self.cleanPreviousInstallation()
+            self["info"].setText("Copying configuration files...")
+            self["status"].setText("Copying files...")
 
-            if not self.createRequiredDirectories():
-                self["status"].setText("Failed to create required directories. Installation aborted.")
-                print("[CiefpSettingsT2miAbertis] Failed to create required directories")
-                return
+            for d in ["/etc/astra", "/etc/astra/scripts", "/etc/tuxbox/config", "/etc/tuxbox/config/oscam-emu"]:
+                os.makedirs(d, exist_ok=True)
 
-            self["info"].setText("Updating package list...")
-            self["status"].setText("The installation is in progress, please wait.")
-            print("[CiefpSettingsT2miAbertis] Installing Astra-SM...")
-            max_attempts = 2
-            attempt = 1
-            astra_sm_installed = False
-
-            # Prvo pokušaj ažuriranje paketa
-            while attempt <= max_attempts:
-                print(f"[CiefpSettingsT2miAbertis] Attempt {attempt} of {max_attempts} to update package list")
-                start_time = time.time()
-                update_result = self.runCommand("opkg update", timeout=45)
-                elapsed_time = time.time() - start_time
-                print(f"[CiefpSettingsT2miAbertis] Attempt {attempt} (update) completed in {elapsed_time:.2f} seconds")
-                print(f"[CiefpSettingsT2miAbertis] Update output: {update_result}")
-
-                if "not found" not in update_result and "failed" not in update_result.lower() and "timed out" not in update_result.lower():
-                    print("[CiefpSettingsT2miAbertis] Package list updated successfully")
-                    break
-                else:
-                    print(f"[CiefpSettingsT2miAbertis] Attempt {attempt} (update) failed: {update_result}")
-                    if attempt == max_attempts:
-                        self["info"].setText("Failed to update package list. Trying to install Astra-SM anyway...")
-                        print("[CiefpSettingsT2miAbertis] All attempts to update package list failed")
-                    else:
-                        self["info"].setText(f"Package list update failed (attempt {attempt}). Retrying...")
-                        time.sleep(2)
-                attempt += 1
-
-            # Pauza pre instalacije Astra-SM
-            time.sleep(5)
-
-            # Pokušaj instalaciju Astra-SM bez obzira na uspeh ažuriranja
-            self["info"].setText("Installing Astra-SM...")
-            attempt = 1
-            while attempt <= max_attempts:
-                print(f"[CiefpSettingsT2miAbertis] Attempt {attempt} of {max_attempts} to install Astra-SM")
-                start_time = time.time()
-                install_result = self.runCommand("opkg install astra-sm", timeout=45)
-                elapsed_time = time.time() - start_time
-                print(f"[CiefpSettingsT2miAbertis] Attempt {attempt} (install) completed in {elapsed_time:.2f} seconds")
-                print(f"[CiefpSettingsT2miAbertis] Install output: {install_result}")
-
-                if "not found" not in install_result and "failed" not in install_result.lower() and "timed out" not in install_result.lower():
-                    self["status"].setText("Astra-SM installed successfully.")
-                    astra_sm_installed = True
-                    break
-                else:
-                    print(f"[CiefpSettingsT2miAbertis] Attempt {attempt} (install) failed: {install_result}")
-                    if attempt == max_attempts:
-                        self["status"].setText("Failed to install Astra-SM. Please install it manually later.")
-                        print("[CiefpSettingsT2miAbertis] All attempts to install Astra-SM failed")
-                    else:
-                        self["info"].setText(f"Astra-SM installation failed (attempt {attempt}). Retrying...")
-                        time.sleep(2)
-                attempt += 1
-
-            # Nastavi sa kopiranjem fajlova
-            self["info"].setText("Installing configuration files...")
-            installed_files = self.installFilesFromPluginData()
-            if not installed_files:
-                self["status"].setText("Failed to install configuration files.")
-                print("[CiefpSettingsT2miAbertis] Failed to install new files")
-                return
-
-            self["info"].setText("\n".join([
-                "Installation successful! Installed files:",
-                *[f"- {file}" for file in installed_files],
-                "\nInstallation complete. Please reboot your system."
-            ]))
-            if astra_sm_installed:
-                self["status"].setText("Installation completed successfully.")
-            else:
-                self["status"].setText("Configuration files installed. Please install Astra-SM manually and reboot.")
-
-            self.session.openWithCallback(self.rebootPrompt, MessageBox,
-                                          "Installation complete! Do you want to reboot now?", MessageBox.TYPE_YESNO)
-
-        except Exception as e:
-            self["status"].setText(f"Error: {str(e)}")
-            print(f"[CiefpSettingsT2miAbertis] Installation error: {str(e)}")
-
-    def cleanPreviousInstallation(self):
-        try:
-            print("[CiefpSettingsT2miAbertis] Cleaning previous installation")
-            start_time = time.time()
-            cleanup_paths = [
-                "/etc/astra/astra.conf",
-                "/etc/sysctl.conf",
-                "/etc/astra/scripts/abertis",
-                "/etc/tuxbox/config/softcam.key",
-                "/etc/tuxbox/config/oscam-emu/softcam.key"
-            ]
-
-            for path in cleanup_paths:
-                if os.path.exists(path):
-                    os.remove(path)
-                    print(f"[CiefpSettingsT2miAbertis] Removed old file: {path}")
-
-            elapsed_time = time.time() - start_time
-            self["info"].setText("Previous installation cleaned successfully.")
-            print(f"[CiefpSettingsT2miAbertis] Cleaning completed in {elapsed_time:.2f} seconds")
-        except Exception as e:
-            self["status"].setText(f"Error cleaning previous installation: {str(e)}")
-            print(f"[CiefpSettingsT2miAbertis] Error cleaning previous installation: {str(e)}")
-
-    def installFilesFromPluginData(self):
-        installed_files = []
-        try:
-            print("[CiefpSettingsT2miAbertis] Installing configuration files")
-            self["info"].setText("Installing configuration files...")
             data_dir = resolveFilename(SCOPE_PLUGINS, "Extensions/CiefpSettingsT2miAbertis/data/")
-            start_time = time.time()
 
-            dest_path = "/etc/sysctl.conf"
-            source_path = os.path.join(data_dir, "sysctl.conf")
-            if not os.path.exists(dest_path) or not self.isFileSame(source_path, dest_path):
-                if self.copyFile(source_path, dest_path):
-                    installed_files.append("sysctl.conf")
-
-            dest_path = "/etc/astra/astra.conf"
-            source_path = os.path.join(data_dir, "astra.conf")
-            if not os.path.exists(dest_path) or not self.isFileSame(source_path, dest_path):
-                if self.copyFile(source_path, dest_path):
-                    installed_files.append("astra.conf")
+            shutil.copy2(os.path.join(data_dir, "sysctl.conf"), "/etc/sysctl.conf")
+            shutil.copy2(os.path.join(data_dir, "astra.conf"), "/etc/astra/astra.conf")
 
             system_info = platform.machine()
             script_arch = "arm" if system_info in ["arm", "armv7", "armv7l"] else "mips" if system_info == "mips" else None
             if not script_arch:
-                self["status"].setText(f"Unsupported architecture: {system_info}")
-                print(f"[CiefpSettingsT2miAbertis] Unsupported architecture: {system_info}")
-                return []
+                raise Exception("Unsupported architecture: %s" % system_info)
 
-            script_dir = os.path.join(data_dir, script_arch)
-            source_path = os.path.join(script_dir, "abertis")
-            dest_path = "/etc/astra/scripts/abertis"
-            if not os.path.exists(dest_path) or not self.isFileSame(source_path, dest_path):
-                if self.copyFile(source_path, dest_path, chmod=0o755):
-                    installed_files.append("abertis")
+            src_abertis = os.path.join(data_dir, script_arch, "abertis")
+            dst_abertis = "/etc/astra/scripts/abertis"
+            self.safe_copy_executable(src_abertis, dst_abertis, mode=0o755)
 
-            softcam_dest_paths = [
-                "/etc/tuxbox/config/softcam.key",
-                "/etc/tuxbox/config/oscam-emu/softcam.key"
-            ]
-            source_path = os.path.join(data_dir, "SoftCam.Key")
-            for dest_path in softcam_dest_paths:
-                if not os.path.exists(dest_path) or not self.isFileSame(source_path, dest_path):
-                    if self.copyFile(source_path, dest_path):
-                        installed_files.append(f"softcam.key ({dest_path})")
-
-            elapsed_time = time.time() - start_time
-            self["info"].setText("All files installed successfully.")
-            print(f"[CiefpSettingsT2miAbertis] File installation completed in {elapsed_time:.2f} seconds")
-            return installed_files
+            src_softcam = os.path.join(data_dir, "SoftCam.Key")
+            shutil.copy2(src_softcam, "/etc/tuxbox/config/softcam.key")
+            shutil.copy2(src_softcam, "/etc/tuxbox/config/oscam-emu/softcam.key")
 
         except Exception as e:
-            self["status"].setText(f"Error during file installation: {str(e)}")
-            print(f"[CiefpSettingsT2miAbertis] Error during file installation: {str(e)}")
-            return []
+            self["status"].setText("Copy error: %s" % str(e))
+            self.runCommandAsync(
+                "if [ -x /etc/init.d/astra-sm ]; then /etc/init.d/astra-sm start >/dev/null 2>&1; fi;",
+                status_text="Starting Astra-SM..."
+            )
+            return
 
-    def copyFile(self, source_path, dest_path, chmod=None):
+        self["info"].setText("Starting Astra-SM...")
+        self.runCommandAsync(
+            "if [ -x /etc/init.d/astra-sm ]; then /etc/init.d/astra-sm start >/dev/null 2>&1; fi;",
+            done_cb=self._installFinish,
+            status_text="Starting Astra-SM..."
+        )
+
+    def _installFinish(self, retval):
+        self["status"].setText("Install done. Press BLUE for Motor Settings list.")
+        self["info"].setText(
+            "Installation successful!\n\n"
+            "Next step:\n"
+            "- Press BLUE (Motor Settings) to install the latest 'ciefp-E2-75E-34W' channel list and reload settings."
+        )
+        self.session.open(
+            MessageBox,
+            "Files copied and Astra-SM restarted.\n\nNow press BLUE (Motor Settings) to install the latest motor list and reload.",
+            MessageBox.TYPE_INFO
+        )
+
+    # -------------------------
+    # MOTOR SETTINGS (blue)
+    # -------------------------
+    def _pick_latest_motor_zip(self, items):
+        best_url = None
+        best_dt = None
+
+        for it in items:
+            name = it.get("name", "")
+            m = MOTOR_ZIP_PATTERN.match(name)
+            if not m:
+                continue
+            date_str = m.group(1)
+            try:
+                dt = datetime.strptime(date_str, "%d.%m.%Y")
+            except Exception:
+                dt = None
+
+            url = it.get("download_url")
+            if not url:
+                continue
+
+            if best_dt is None and best_url is None:
+                best_dt, best_url = dt, url
+            else:
+                if dt and best_dt and dt > best_dt:
+                    best_dt, best_url = dt, url
+                elif dt and best_dt is None:
+                    best_dt, best_url = dt, url
+
+        return best_url, best_dt
+
+    def getLatestMotorZipUrl(self):
         try:
-            print(f"[CiefpSettingsT2miAbertis] Copying {source_path} to {dest_path}")
-            start_time = time.time()
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            shutil.copy2(source_path, dest_path)
-            if chmod:
-                os.chmod(dest_path, chmod)
-            elapsed_time = time.time() - start_time
-            print(f"[CiefpSettingsT2miAbertis] Copied {source_path} to {dest_path} in {elapsed_time:.2f} seconds")
-            return True
+            resp = urlopen(GITHUB_ZIPPED_ROOT_API, timeout=20)
+            items = json.loads(resp.read().decode("utf-8"))
+            zip_url, zip_dt = self._pick_latest_motor_zip(items)
+            return zip_url, zip_dt
         except Exception as e:
-            self["status"].setText(f"Error copying {source_path} to {dest_path}: {str(e)}")
-            print(f"[CiefpSettingsT2miAbertis] Error copying {source_path} to {dest_path}: {str(e)}")
-            return False
+            self["status"].setText("GitHub fetch error: %s" % str(e))
+            return None, None
 
-    def runCommand(self, command, timeout=120):
+    def installMotorSettings(self):
+        self["status"].setText("Checking latest Motor Settings ZIP...")
+        zip_url, zip_dt = self.getLatestMotorZipUrl()
+        if not zip_url:
+            self["status"].setText("No matching motor ZIP found on GitHub.")
+            return
+
+        shown_ver = zip_dt.strftime("%d.%m.%Y") if zip_dt else "unknown"
+        self["info"].setText("Installing Motor Settings...\n\nFound version: %s\nSource:\n%s" % (shown_ver, zip_url))
+
+        cmd = (
+            "opkg install unzip >/dev/null 2>&1; "
+            "rm -rf /tmp/ciefp_motor /tmp/ciefp_motor.zip; "
+            "mkdir -p /tmp/ciefp_motor; "
+            "wget -O /tmp/ciefp_motor.zip \"%s\" >/dev/null 2>&1; "
+            "unzip -o /tmp/ciefp_motor.zip -d /tmp/ciefp_motor >/dev/null 2>&1; "
+            "cp -rf /tmp/ciefp_motor/*/* /etc/enigma2/ >/dev/null 2>&1; "
+            "if [ -f /tmp/ciefp_motor/*/satellites.xml ]; then "
+            "  mkdir -p /etc/tuxbox/; "
+            "  cp -f /tmp/ciefp_motor/*/satellites.xml /etc/tuxbox/ >/dev/null 2>&1; "
+            "fi; "
+            "sync; "
+            "rm -rf /tmp/ciefp_motor /tmp/ciefp_motor.zip; "
+        ) % zip_url
+
+        self.runCommandAsync(cmd, done_cb=self._motorSettingsDone, status_text="Installing Motor Settings...")
+
+    def _motorSettingsDone(self, retval):
+        if retval != 0:
+            self["status"].setText("Motor Settings install failed (code %d)." % retval)
+            return
+
         try:
-            print(f"[CiefpSettingsT2miAbertis] Executing command: {command}")
-            start_time = time.time()
-            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout, stderr = process.communicate(timeout=timeout)
-            elapsed_time = time.time() - start_time
-            output = stdout.decode("utf-8", errors="ignore") if process.returncode == 0 else stderr.decode("utf-8", errors="ignore")
-            print(f"[CiefpSettingsT2miAbertis] Command '{command}' completed in {elapsed_time:.2f} seconds with return code {process.returncode}")
-            print(f"[CiefpSettingsT2miAbertis] Command output: {output}")
-            if process.returncode != 0:
-                return output
-            return output
-        except subprocess.TimeoutExpired:
-            process.kill()
-            print(f"[CiefpSettingsT2miAbertis] Command '{command}' timed out after {timeout} seconds")
-            return f"Command timed out after {timeout} seconds"
+            db = eDVBDB.getInstance()
+            db.reloadServicelist()
+            db.reloadBouquets()
+            self["status"].setText("Motor Settings installed & reloaded successfully.")
+            self["info"].setText(
+                "Motor Settings installed successfully!\n\n"
+                "Done:\n"
+                "- Download ZIP from GitHub\n"
+                "- Install to /etc/enigma2\n"
+                "- Copy satellites.xml (if present)\n"
+                "- Reload servicelist & bouquets\n"
+            )
         except Exception as e:
-            print(f"[CiefpSettingsT2miAbertis] Error executing command '{command}': {str(e)}")
-            return f"Error executing command: {str(e)}"
+            self["status"].setText("Installed, but reload failed: %s" % str(e))
+
+    def exitPlugin(self):
+        self.close()
 
     def rebootPrompt(self, confirmed):
         if confirmed:
-            print("[CiefpSettingsT2miAbertis] Initiating system reboot")
             self.close()
-            self.runCommand("reboot")
+            self.runCommandAsync("reboot", status_text="Rebooting...")
 
-    def exitPlugin(self):
-        print("[CiefpSettingsT2miAbertis] Exiting plugin")
-        self.close()
 
 def Plugins(**kwargs):
     return [
         PluginDescriptor(
             name=PLUGIN_NAME,
-            description=f"Installer for T2MI Abertis configuration (Version {PLUGIN_VERSION})",
+            description="Installer for T2MI Abertis configuration (Version %s)" % PLUGIN_VERSION,
             where=[PluginDescriptor.WHERE_PLUGINMENU, PluginDescriptor.WHERE_EXTENSIONSMENU],
             icon=ICON_PATH,
             fnc=lambda session, **kwargs: session.open(CiefpSettingsT2miAbertis)
