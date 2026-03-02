@@ -18,7 +18,7 @@ from Tools.Directories import resolveFilename, SCOPE_PLUGINS
 from Plugins.Plugin import PluginDescriptor
 
 
-PLUGIN_VERSION = "2.0"
+PLUGIN_VERSION = "2.1"
 PLUGIN_NAME = "CiefpSettingsT2miAbertis"
 ICON_PATH = "/usr/lib/enigma2/python/Plugins/Extensions/CiefpSettingsT2miAbertis/icon.png"
 
